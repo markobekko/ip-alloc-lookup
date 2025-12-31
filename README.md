@@ -59,7 +59,7 @@ ip-alloc-lookup = "0.1"
 
 ```rust
 use std::net::Ipv4Addr;
-use eu_geoip::GeoIpDb;
+use ip_alloc_lookup::GeoIpDb;
 
 let db = GeoIpDb::new();
 
@@ -74,7 +74,7 @@ if let Some(info) = db.lookup_v4(ip) {
 
 ```rust
 use std::net::Ipv6Addr;
-use eu_geoip::GeoIpDb;
+use ip_alloc_lookup::GeoIpDb;
 
 let db = GeoIpDb::new();
 
@@ -91,7 +91,7 @@ if let Some(info) = db.lookup_v6(ip) {
 
 ```rust
 use std::net::IpAddr;
-use eu_geoip::GeoIpDb;
+use ip_alloc_lookup::GeoIpDb;
 
 let db = GeoIpDb::new();
 
@@ -132,11 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_path = "cache/ripe-data.txt";
 
     // 1) Update cache from the official RIPE delegated URL
-    let bytes = eu_geoip::GeoIpDb::update_cache(cache_path)?;
+    let bytes = ip_alloc_lookup::GeoIpDb::update_cache(cache_path)?;
     println!("Downloaded {bytes} bytes into {cache_path}");
 
     // 2) Load database from cached file (not embedded data)
-    let db = eu_geoip::GeoIpDb::from_ripe_delegated_file(cache_path)?;
+    let db = ip_alloc_lookup::GeoIpDb::from_ripe_delegated_file(cache_path)?;
 
     // 3) Perform a lookup
     let ip: IpAddr = "88.198.0.1".parse()?; // commonly DE (Hetzner)
