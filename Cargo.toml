@@ -10,12 +10,9 @@ documentation = "https://docs.rs/ip-alloc-lookup"
 readme = "README.md"
 keywords = [
     "ip",
-    "ip-allocation",
     "rir",
     "ip-range",
     "lookup",
-    "country",
-    "eu",
     "offline",
 ]
 
