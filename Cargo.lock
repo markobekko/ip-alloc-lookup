@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "ip-alloc-lookup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "rand 0.8.5",
