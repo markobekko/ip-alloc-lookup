@@ -48,7 +48,7 @@ It does **not** indicate where traffic is physically routed or processed.
 
 ```toml
 [dependencies]
-ip-alloc-lookup = "0.1"
+ip-alloc-lookup = "0.1.3"
 ```
 
 ---
