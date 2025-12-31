@@ -1,7 +1,41 @@
+//! Build-time generation of embedded RIPE IP allocation tables.
+//!
+//! This build script parses a RIPE NCC delegated statistics file and converts it
+//! into compact, sorted Rust data structures that are embedded into the final
+//! binary.
+//!
+//! ## Why a build script?
+//!
+//! - Avoids parsing large text files at runtime
+//! - Ensures deterministic, versioned data snapshots
+//! - Enables zero-I/O startup
+//!
+//! ## Output
+//!
+//! The script generates a Rust source file in `OUT_DIR` containing:
+//!
+//! - A sorted IPv4 range table using `u32` addresses
+//! - A sorted IPv6 range table using `u128` addresses
+//!
+//! These tables are later included by the library and used for binary search.
+//!
+//! ## IPv6 handling
+//!
+//! RIPE encodes IPv6 allocations using prefix lengths. During code generation,
+//! these prefixes are expanded into inclusive `[start, end]` ranges to allow
+//! direct numeric comparison at runtime.
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+/// Build script: parses `ripe-data.txt` and emits `generated_data.rs` into `OUT_DIR`.
+///
+/// The generated file contains two sorted tables:
+/// - `IPV4_RANGES: &[(u32, u32, &str)]`
+/// - `IPV6_RANGES: &[(u128, u128, &str)]`
+///
+/// These tables are included by the library at compile time for fast, offline lookups.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=ripe-data.txt");
@@ -67,7 +101,13 @@ fn main() {
         v4_ranges.len(), v6_ranges.len());
 }
 
-// Parser for build script that handles both IPv4 and IPv6
+/// Parse RIPE delegated stats content into sorted IPv4/IPv6 range lists for codegen.
+///
+/// For IPv4 lines, returns `(start_u32, count, country)`.
+/// For IPv6 lines, RIPE’s “count” field is a prefix length; this converts it into an
+/// inclusive end address and returns `(start_u128, end_u128, country)`.
+///
+/// The returned vectors are sorted by start address to enable binary search at runtime.
 fn parse_ripe_data(content: &str) -> (Vec<(u32, u32, String)>, Vec<(u128, u128, String)>) {
     let mut v4_ranges = Vec::new();
     let mut v6_ranges = Vec::new();

@@ -1,41 +1,41 @@
-//! # Offline RIPE-based IP Allocation Lookup
+//! Offline IP-to-country and region classification based on RIPE NCC data.
 //!
-//! This crate provides fast, offline lookups for IPv4 and IPv6 addresses based on
-//! RIPE NCC delegated allocation data. It maps IP address ranges to ISO-3166
-//! country codes and includes a built-in classification for European Union (EU)
-//! membership.
+//! This crate provides a lightweight, allocation-based alternative to
+//! MaxMind-style GeoIP databases. Instead of city-level precision, it focuses on:
 //!
-//! ## What this crate does
+//! - Country code (ISO-3166 alpha-2)
+//! - Coarse regional grouping (EU / non-EU, etc.)
+//! - Fully offline, deterministic lookups
 //!
-//! - Performs **purely offline** IP lookups using pre-generated range tables.
-//! - Supports **IPv4 and IPv6** with logarithmic-time lookups.
-//! - Uses **RIPE delegated statistics**, not active geolocation or probing.
-//! - Associates each IP range with a **country code** and an **EU membership flag**.
+//! ## Data source
 //!
-//! ## What this crate does NOT do
+//! The database is built from RIPE NCC “delegated statistics” files, which list
+//! IPv4 and IPv6 address allocations by country. These files are:
 //!
-//! - It does **not** determine the physical location of hosts or users.
-//! - It does **not** track BGP routing, anycast behavior, or traffic paths.
-//! - It does **not** provide legal or regulatory compliance guarantees.
+//! - Public
+//! - Regularly updated
+//! - Easy to parse and cache
 //!
-//! The country and EU information reflect the **RIR allocation or assignment
-//! metadata** published by RIPE NCC. In real-world networks, traffic may be served
-//! from different locations due to CDNs, anycast, tunneling, or routing policies.
+//! By default, a preprocessed snapshot is embedded at compile time for
+//! zero-I/O runtime lookups.
 //!
 //! ## Design goals
 //!
-//! - Predictable performance (no syscalls or I/O on lookup).
-//! - Deterministic results (static data, no runtime mutation).
-//! - Minimal memory overhead and no mandatory external dependencies.
+//! - No runtime network access required
+//! - Minimal memory usage
+//! - Fast lookups via binary search
+//! - Simple API suitable for policy decisions (e.g. GDPR / EU checks)
 //!
-//! ## Typical use cases
+//! ## Limitations
 //!
-//! - High-throughput IP classification in hot paths (firewalls, proxies, logging).
-//! - Allocation-based policy checks (e.g. EU vs non-EU).
-//! - Offline or restricted environments where external services are unavailable.
+//! This crate does **not** attempt to provide:
 //!
-//! This crate should be understood as an **IP allocation lookup**, not a
-//! geolocation service.
+//! - City or ISP precision
+//! - User location inference
+//! - Dynamic routing awareness
+//!
+//! It reflects allocation data, not actual physical location.
+
 mod database;
 
 // Re-export public API
@@ -44,6 +44,14 @@ pub use database::{GeoIpDb, GeoInfo, DbStats};
 // We keep the parser public for users who want to work with raw RIPE data
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+/// A single allocation block parsed from a RIPE delegated statistics file.
+///
+/// For IPv4 blocks, `start_v4` is `Some` and `start_v6` is `None`.
+/// For IPv6 blocks, `start_v6` is `Some` and `start_v4` is `None`.
+///
+/// `count` is the number of addresses in the block. For IPv6 lines, RIPE uses a
+/// prefix length in the “count” field; this parser converts that prefix length
+/// into an address count (`2^(128-prefix_len)`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IpRange {
     pub start_v4: Option<Ipv4Addr>,
@@ -52,8 +60,29 @@ pub struct IpRange {
     pub country: String,
 }
 
-/// Parses RIPE delegated stats format for both IPv4 and IPv6
-/// This is exposed for advanced users who want to process RIPE data themselves
+/// Parse RIPE NCC “delegated-*” statistics content into allocation ranges.
+///
+/// This parser is intentionally simple:
+/// - Ignores comment lines (`#...`) and summary/header lines starting with `2`.
+/// - Accepts only `ipv4` and `ipv6` records.
+/// - Keeps the two-letter country code exactly as present in the file.
+///
+/// For IPv4 records, `count` is the number of addresses.
+/// For IPv6 records, RIPE encodes the *prefix length* in the “count” field; this
+/// function converts it to an address count.
+///
+/// # Examples
+/// ```
+/// use offline_ripe_geoip::parse_ripe_delegated;
+///
+/// let data = "ripencc|DE|ipv4|46.4.0.0|256|20250101|allocated\n";
+/// let ranges = parse_ripe_delegated(data);
+/// assert_eq!(ranges.len(), 1);
+/// assert_eq!(ranges[0].country, "DE");
+/// ```
+///
+/// # Notes
+/// This does not validate that the returned ranges are non-overlapping or sorted.
 pub fn parse_ripe_delegated(content: &str) -> Vec<IpRange> {
     content
         .lines()

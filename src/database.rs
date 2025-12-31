@@ -1,3 +1,38 @@
+//! In-memory IP range database and lookup logic.
+//!
+//! This module contains the core data structures used for fast, allocation-based
+//! IP classification. It is intentionally minimal and avoids external dependencies
+//! at runtime.
+//!
+//! ## Structure
+//!
+//! - [`GeoIpDb`] owns sorted IPv4 and IPv6 range tables
+//! - [`GeoInfo`] stores the classification result for a range
+//! - [`Region`] provides a coarse regional grouping abstraction
+//!
+//! IPv4 and IPv6 are handled separately to keep lookup logic simple and fast.
+//! All lookups are performed using binary search over pre-sorted ranges.
+//!
+//! ## Performance characteristics
+//!
+//! - Lookups are `O(log n)`
+//! - No heap allocation during lookup
+//! - Suitable for hot paths (e.g. request filtering, logging, metrics)
+//!
+//! ## Safety and correctness
+//!
+//! The database assumes that input ranges are:
+//!
+//! - Non-overlapping
+//! - Sorted by start address
+//!
+//! These invariants are guaranteed by the build script or runtime constructors.
+//!
+//! ## Regional classification
+//!
+//! Region grouping (e.g. EU vs non-EU) is derived from the country code using a
+//! fixed mapping. This mapping is a policy decision and may evolve over time.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{fs, io, path::Path};
 
@@ -5,6 +40,13 @@ use std::{fs, io, path::Path};
 pub const RIPE_EXTENDED_LATEST_URL: &str =
     "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest";
 
+/// Compact classification result for a single IP range.
+///
+/// The country code is stored as two ASCII bytes (e.g. `b'D', b'E'`), and `is_eu`
+/// is a convenience flag derived from a built-in EU membership list.
+///
+/// `region` is stored as a small numeric code; use [`GeoInfo::region_enum`]
+/// for a typed view.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct GeoInfo {
@@ -13,6 +55,10 @@ pub struct GeoInfo {
     pub region: u8,
 }
 
+/// High-level region classification derived from the country code.
+///
+/// This is not a geolocation signal; it is a coarse grouping intended for
+/// policy-style decisions (e.g. "EU vs non-EU").
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
@@ -28,6 +74,7 @@ pub enum Region {
 }
 
 impl Region {
+	/// Return a human-readable label for this region.
     pub fn as_str(self) -> &'static str {
         match self {
             Region::EuropeanUnion => "European Union",
@@ -43,20 +90,27 @@ impl Region {
     }
 }
 
-// Convert a 2-letter country code like "DE" into [b'D', b'E'].
+/// Convert a 2-letter country code like "DE" into [b'D', b'E'].
 fn cc2(country: &str) -> [u8; 2] {
     let b = country.as_bytes();
     // RIPE data should always be 2-letter country codes; if not, fall back.
     if b.len() >= 2 { [b[0], b[1]] } else { *b"??" }
 }
 
-// For display/testing convenience.
+/// For display/testing convenience.
 impl GeoInfo {
+	/// Return the ISO-3166 alpha-2 country code as a string slice.
+	///
+	/// This is intended for display/logging and should always be valid ASCII.
+	/// If the stored bytes are not valid UTF-8 (unexpected), this falls back to `"??"`.
     pub fn country_code_str(&self) -> &str {
         // Always valid for ASCII 2-letter codes; fallback if somehow invalid.
         std::str::from_utf8(&self.country_code).unwrap_or("??")
     }
-
+	
+	/// Interpret the stored numeric `region` code as a [`Region`] enum.
+	///
+	/// Unknown or unsupported codes map to [`Region::Other`].
     pub fn region_enum(&self) -> Region {
         match self.region {
             1 => Region::EuropeanUnion,
@@ -73,6 +127,10 @@ impl GeoInfo {
 }
 
 
+/// Offline, in-memory lookup database for allocation-based IP classification.
+///
+/// The default constructor (`new`) uses range tables generated at build time.
+/// Lookups are performed with binary search and do not allocate.
 pub struct GeoIpDb {
     v4_ranges: Vec<(u32, u32, GeoInfo)>,
     v6_ranges: Vec<(u128, u128, GeoInfo)>,
@@ -89,7 +147,18 @@ const EU_COUNTRIES: &[&str] = &[
 include!(concat!(env!("OUT_DIR"), "/generated_data.rs"));
 
 impl GeoIpDb {
-    /// Create a new database with embedded RIPE data
+    /// Construct a database using the embedded range tables generated at build time.
+	///
+	/// This is the fastest and most predictable option: no I/O and no parsing at runtime.
+	///
+	/// # Examples
+	/// ```
+	/// use offline_ripe_geoip::GeoIpDb;
+	///
+	/// let db = GeoIpDb::new();
+	/// let info = db.lookup("46.4.0.1".parse().unwrap());
+	/// assert!(info.is_some());
+	/// ```
     pub fn new() -> Self {
         let mut v4_ranges = Vec::with_capacity(IPV4_RANGES.len());
         let mut v6_ranges = Vec::with_capacity(IPV6_RANGES.len());
@@ -129,7 +198,19 @@ impl GeoIpDb {
         GeoIpDb { v4_ranges, v6_ranges }
     }
 	
-	/// Build a DB from RIPE delegated stats *content* (runtime).
+	/// Build a database by parsing RIPE delegated stats content at runtime.
+	///
+	/// This is useful when you want to load newer data from a cache or ship your own
+	/// dataset. The resulting ranges are sorted for efficient lookup.
+	///
+	/// # Examples
+	/// ```
+	/// use offline_ripe_geoip::GeoIpDb;
+	///
+	/// let data = "ripencc|DE|ipv4|46.4.0.0|256|20250101|allocated\n";
+	/// let db = GeoIpDb::from_ripe_delegated_str(data);
+	/// assert!(db.lookup("46.4.0.1".parse().unwrap()).is_some());
+	/// ```
     pub fn from_ripe_delegated_str(content: &str) -> Self {
         let parsed = crate::parse_ripe_delegated(content);
 
@@ -163,13 +244,19 @@ impl GeoIpDb {
         GeoIpDb { v4_ranges, v6_ranges }
     }
 
-    /// Load RIPE delegated stats data from a file at runtime.
+    /// Load RIPE delegated stats content from a file and build a database.
+	///
+	/// # Errors
+	/// Returns an error if the file cannot be read.
     pub fn from_ripe_delegated_file<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let content = fs::read_to_string(path)?;
         Ok(Self::from_ripe_delegated_str(&content))
     }
 
-    /// Try to load from a cache file; if missing/unreadable, fall back to embedded data.
+    /// Try to load the database from a cache file, falling back to embedded data.
+	///
+	/// This is a convenience helper for "use cache if present, otherwise use the
+	/// built-in tables".
     pub fn from_cache_or_embedded<P: AsRef<Path>>(cache_path: P) -> Self {
         match Self::from_ripe_delegated_file(cache_path) {
             Ok(db) => db,
@@ -177,7 +264,9 @@ impl GeoIpDb {
         }
     }
 
-    /// Look up an IPv4 address
+    /// Look up a single IPv4 address.
+	///
+	/// Returns [`None`] if the address is not covered by the embedded/loaded ranges.
 	#[inline]
     pub fn lookup_v4(&self, ip: Ipv4Addr) -> Option<&GeoInfo> {
 		let ip_u32: u32 = ip.into();
@@ -196,7 +285,9 @@ impl GeoIpDb {
 		}
 	}
 
-    /// Look up an IPv6 address
+    /// Look up a single IPv6 address.
+	///
+	/// Returns [`None`] if the address is not covered by the embedded/loaded ranges.
 	#[inline]
 	pub fn lookup_v6(&self, ip: Ipv6Addr) -> Option<&GeoInfo> {
 		let ip_u128: u128 = ip.into();
@@ -230,7 +321,16 @@ impl GeoIpDb {
 		}
 	}
 
-    /// Look up any IP address (IPv4 or IPv6)
+    /// Look up an IP address (IPv4 or IPv6).
+	///
+	/// # Examples
+	/// ```
+	/// use offline_ripe_geoip::GeoIpDb;
+	///
+	/// let db = GeoIpDb::new();
+	/// let info = db.lookup("46.4.0.1".parse().unwrap()).unwrap();
+	/// assert_eq!(info.country_code_str(), "DE");
+	/// ```
     pub fn lookup(&self, ip: IpAddr) -> Option<&GeoInfo> {
         match ip {
             IpAddr::V4(v4) => self.lookup_v4(v4),
@@ -238,13 +338,17 @@ impl GeoIpDb {
         }
     }
 
-    /// Convenience method: check if IP is in EU
+    /// Return `true` if the IP is covered by the database and classified as EU.
+	///
+	/// Addresses not found in the database return `false`.
 	#[inline]
     pub fn is_eu(&self, ip: IpAddr) -> bool {
         self.lookup(ip).map(|info| info.is_eu).unwrap_or(false)
     }
 
-    /// Get statistics about the database
+    /// Return basic statistics about the loaded database.
+	///
+	/// This can be useful for sanity checks (e.g., validating that data loaded correctly).
     pub fn stats(&self) -> DbStats {
         let total_v4_ranges = self.v4_ranges.len();
         let total_v6_ranges = self.v6_ranges.len();
@@ -265,8 +369,15 @@ impl GeoIpDb {
 #[cfg(feature = "download")]
 impl GeoIpDb {
     /// Download RIPE delegated data from `url` and atomically replace `cache_path`.
-    ///
-    /// Returns the number of bytes written.
+	///
+	/// The download is written to a temporary file next to the destination and then
+	/// renamed into place.
+	///
+	/// # Errors
+	/// Returns an error if the download fails or the cache file cannot be written.
+	///
+	/// # Feature
+	/// Available only when the crate is built with the `download` feature.
     pub fn update_cache_from_url<P: AsRef<Path>>(cache_path: P, url: &str) -> io::Result<u64> {
         let cache_path = cache_path.as_ref();
 
@@ -304,7 +415,11 @@ impl GeoIpDb {
         Ok(bytes.len() as u64)
     }
 
-    /// Convenience: update from RIPE "extended latest".
+    /// Convenience wrapper around [`GeoIpDb::update_cache_from_url`] using the
+	/// RIPE “extended latest” endpoint.
+	///
+	/// # Feature
+	/// Available only when the crate is built with the `download` feature.
     pub fn update_cache<P: AsRef<Path>>(cache_path: P) -> io::Result<u64> {
         Self::update_cache_from_url(cache_path, RIPE_EXTENDED_LATEST_URL)
     }
@@ -316,6 +431,7 @@ impl Default for GeoIpDb {
     }
 }
 
+/// Summary counts for the database contents.
 #[derive(Debug)]
 pub struct DbStats {
     pub total_v4_ranges: usize,
@@ -326,6 +442,9 @@ pub struct DbStats {
     pub non_eu_v6_ranges: usize,
 }
 
+/// Map a country code to a coarse [`Region`] bucket.
+///
+/// This mapping is a policy-oriented heuristic and may be adjusted over time.
 fn determine_region(country_code: &str) -> Region {
     if EU_COUNTRIES.contains(&country_code) {
         Region::EuropeanUnion
